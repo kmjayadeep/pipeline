@@ -48,6 +48,9 @@ import (
 	"github.com/tektoncd/pipeline/pkg/taskrunmetrics"
 	_ "github.com/tektoncd/pipeline/pkg/taskrunmetrics/fake" // Make sure the taskrunmetrics are setup
 	"github.com/tektoncd/pipeline/pkg/workspace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -95,6 +98,10 @@ var (
 func (c *Reconciler) ReconcileKind(ctx context.Context, tr *v1beta1.TaskRun) pkgreconciler.Event {
 	logger := logging.FromContext(ctx)
 	ctx = cloudevent.ToContext(ctx, c.cloudEventClient)
+	tracer := otel.Tracer("TaskRunReconciler")
+	ctx, span := tracer.Start(ctx, "ReconcileKind")
+	span.SetAttributes(attribute.String("task", tr.Name), attribute.String("namespace", tr.Namespace))
+	defer span.End()
 	// By this time, params and workspaces should not be propagated for embedded tasks so we cannot
 	// validate that all parameter variables and workspaces used in the TaskSpec are declared by the Task.
 	ctx = config.SkipValidationDueToPropagatedParametersAndWorkspaces(ctx, true)
@@ -118,10 +125,12 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, tr *v1beta1.TaskRun) pkg
 		// on the event to perform user facing initialisations, such has reset a CI check status
 		afterCondition := tr.Status.GetCondition(apis.ConditionSucceeded)
 		events.Emit(ctx, nil, afterCondition, tr)
+		span.AddEvent("taskrun initialized")
 	}
 
 	// If the TaskRun is complete, run some post run fixtures when applicable
 	if tr.IsDone() {
+		span.AddEvent("taskrun done")
 		logger.Infof("taskrun done : %s \n", tr.Name)
 
 		// We may be reading a version of the object that was stored at an older version
@@ -141,6 +150,7 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, tr *v1beta1.TaskRun) pkg
 		if err := c.stopSidecars(ctx, tr); err != nil {
 			return err
 		}
+		span.AddEvent("stopped sidecars")
 
 		return c.finishReconcileUpdateEmitEvents(ctx, tr, before, nil)
 	}
@@ -168,11 +178,14 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, tr *v1beta1.TaskRun) pkg
 
 	// prepare fetches all required resources, validates them together with the
 	// taskrun, runs API conversions. In case of error we update, emit events and return.
+	span.AddEvent("preparing")
 	_, rtr, err := c.prepare(ctx, tr)
 	if err != nil {
 		logger.Errorf("TaskRun prepare error: %v", err.Error())
 		// We only return an error if update failed, otherwise we don't want to
 		// reconcile an invalid TaskRun anymore
+		span.SetStatus(codes.Error, "taskrun prepare error")
+		span.RecordError(err)
 		return c.finishReconcileUpdateEmitEvents(ctx, tr, nil, err)
 	}
 
@@ -184,6 +197,7 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, tr *v1beta1.TaskRun) pkg
 	if err = c.reconcile(ctx, tr, rtr); err != nil {
 		logger.Errorf("Reconcile: %v", err.Error())
 	}
+	span.AddEvent("taskrun reconciled")
 
 	// Emit events (only when ConditionSucceeded was changed)
 	if err = c.finishReconcileUpdateEmitEvents(ctx, tr, before, err); err != nil {
@@ -196,6 +210,7 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, tr *v1beta1.TaskRun) pkg
 		// Snooze this resource until the timeout has elapsed.
 		return controller.NewRequeueAfter(tr.GetTimeout(ctx) - elapsed)
 	}
+	span.AddEvent("reconciler done")
 	return nil
 }
 
@@ -318,6 +333,11 @@ func (c *Reconciler) finishReconcileUpdateEmitEvents(ctx context.Context, tr *v1
 func (c *Reconciler) prepare(ctx context.Context, tr *v1beta1.TaskRun) (*v1beta1.TaskSpec, *resources.ResolvedTaskResources, error) {
 	logger := logging.FromContext(ctx)
 	tr.SetDefaults(ctx)
+
+	tracer := otel.Tracer("TaskRunReconciler")
+	ctx, span := tracer.Start(ctx, "Preparation")
+	span.SetAttributes(attribute.String("task", tr.Name), attribute.String("namespace", tr.Namespace))
+	defer span.End()
 
 	getTaskfunc, err := resources.GetTaskFuncFromTaskRun(ctx, c.KubeClientSet, c.PipelineClientSet, c.resolutionRequester, tr)
 	if err != nil {
