@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"strings"
 	"time"
+  "encoding/json"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/tektoncd/pipeline/pkg/apis/config"
@@ -51,6 +52,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+  "go.opentelemetry.io/otel/propagation"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -90,6 +92,7 @@ type Reconciler struct {
 // Check that our Reconciler implements taskrunreconciler.Interface
 var (
 	_ taskrunreconciler.Interface = (*Reconciler)(nil)
+  TRACE_NAME = "TaskRunReconciler"
 )
 
 // ReconcileKind compares the actual state with the desired, and attempts to
@@ -98,10 +101,38 @@ var (
 func (c *Reconciler) ReconcileKind(ctx context.Context, tr *v1beta1.TaskRun) pkgreconciler.Event {
 	logger := logging.FromContext(ctx)
 	ctx = cloudevent.ToContext(ctx, c.cloudEventClient)
-	tracer := otel.Tracer("TaskRunReconciler")
-	ctx, span := tracer.Start(ctx, "ReconcileKind")
-	span.SetAttributes(attribute.String("task", tr.Name), attribute.String("namespace", tr.Namespace))
+  carrier := make(map[string]string)
+  pro := otel.GetTextMapPropagator()
+
+  if _, e := tr.Annotations["spanContext"]; !e {
+    ctx, span := otel.Tracer(TRACE_NAME).Start(ctx, "Reconciler:TaskRun")
+    defer span.End()
+    span.SetAttributes(attribute.String("task", tr.Name), attribute.String("namespace", tr.Namespace))
+
+    pro.Inject(ctx, propagation.MapCarrier(carrier))
+
+    logger.Info("got carrier", carrier)
+
+    marshalled, err := json.Marshal(carrier)
+    if err != nil {
+      return err
+    }
+    logger.Info("adding spancontext", "ctx", string(marshalled))
+    tr.Annotations["spanContext"] = string(marshalled)
+    span.AddEvent("Updatng TaskRun CR with SpanContext annotations")
+  }
+
+  err := json.Unmarshal([]byte(tr.Annotations["spanContext"]), &carrier)
+  if err != nil {
+    return err
+  }
+
+  ctx = pro.Extract(ctx, propagation.MapCarrier(carrier))
+  ctx, span := otel.Tracer(TRACE_NAME).Start(ctx, "ReconcileKind")
 	defer span.End()
+
+	span.SetAttributes(attribute.String("task", tr.Name), attribute.String("namespace", tr.Namespace))
+
 	// By this time, params and workspaces should not be propagated for embedded tasks so we cannot
 	// validate that all parameter variables and workspaces used in the TaskSpec are declared by the Task.
 	ctx = config.SkipValidationDueToPropagatedParametersAndWorkspaces(ctx, true)
@@ -233,6 +264,8 @@ func (c *Reconciler) checkPodFailed(tr *v1beta1.TaskRun) (bool, v1beta1.TaskRunR
 }
 
 func (c *Reconciler) durationAndCountMetrics(ctx context.Context, tr *v1beta1.TaskRun) {
+	ctx, span := otel.Tracer(TRACE_NAME).Start(ctx, "durationAndCountMetrics")
+	defer span.End()
 	logger := logging.FromContext(ctx)
 	if tr.IsDone() {
 		newTr, err := c.taskRunLister.TaskRuns(tr.Namespace).Get(tr.Name)
@@ -257,6 +290,8 @@ func (c *Reconciler) durationAndCountMetrics(ctx context.Context, tr *v1beta1.Ta
 }
 
 func (c *Reconciler) stopSidecars(ctx context.Context, tr *v1beta1.TaskRun) error {
+	ctx, span := otel.Tracer(TRACE_NAME).Start(ctx, "stopSidecars")
+	defer span.End()
 	logger := logging.FromContext(ctx)
 	// do not continue without knowing the associated pod
 	if tr.Status.PodName == "" {
@@ -302,6 +337,8 @@ func (c *Reconciler) stopSidecars(ctx context.Context, tr *v1beta1.TaskRun) erro
 }
 
 func (c *Reconciler) finishReconcileUpdateEmitEvents(ctx context.Context, tr *v1beta1.TaskRun, beforeCondition *apis.Condition, previousError error) error {
+	ctx, span := otel.Tracer(TRACE_NAME).Start(ctx, "stopSidecars")
+	defer span.End()
 	logger := logging.FromContext(ctx)
 
 	afterCondition := tr.Status.GetCondition(apis.ConditionSucceeded)
@@ -334,8 +371,7 @@ func (c *Reconciler) prepare(ctx context.Context, tr *v1beta1.TaskRun) (*v1beta1
 	logger := logging.FromContext(ctx)
 	tr.SetDefaults(ctx)
 
-	tracer := otel.Tracer("TaskRunReconciler")
-	ctx, span := tracer.Start(ctx, "Preparation")
+	ctx, span := otel.Tracer(TRACE_NAME).Start(ctx, "Preparation")
 	span.SetAttributes(attribute.String("task", tr.Name), attribute.String("namespace", tr.Namespace))
 	defer span.End()
 
@@ -463,6 +499,8 @@ func (c *Reconciler) prepare(ctx context.Context, tr *v1beta1.TaskRun) (*v1beta1
 // error but it does not sync updates back to etcd. It does not emit events.
 // `reconcile` consumes spec and resources returned by `prepare`
 func (c *Reconciler) reconcile(ctx context.Context, tr *v1beta1.TaskRun, rtr *resources.ResolvedTaskResources) error {
+	ctx, span := otel.Tracer(TRACE_NAME).Start(ctx, "recocnile")
+	defer span.End()
 	defer c.durationAndCountMetrics(ctx, tr)
 	logger := logging.FromContext(ctx)
 	recorder := controller.GetEventRecorder(ctx)
@@ -562,6 +600,8 @@ func (c *Reconciler) reconcile(ctx context.Context, tr *v1beta1.TaskRun, rtr *re
 }
 
 func (c *Reconciler) updateTaskRunWithDefaultWorkspaces(ctx context.Context, tr *v1beta1.TaskRun, taskSpec *v1beta1.TaskSpec) error {
+	ctx, span := otel.Tracer(TRACE_NAME).Start(ctx, "updateTaskRunWithDefaultWorkspaces")
+	defer span.End()
 	configMap := config.FromContextOrDefaults(ctx)
 	defaults := configMap.Defaults
 	if defaults.DefaultTaskRunWorkspaceBinding != "" {
@@ -656,6 +696,8 @@ func (c *Reconciler) handlePodCreationError(tr *v1beta1.TaskRun, err error) erro
 // failTaskRun function may return an error in case the pod could not be deleted
 // failTaskRun may update the local TaskRun status, but it won't push the updates to etcd
 func (c *Reconciler) failTaskRun(ctx context.Context, tr *v1beta1.TaskRun, reason v1beta1.TaskRunReason, message string) error {
+	ctx, span := otel.Tracer(TRACE_NAME).Start(ctx, "failTaskRun")
+	defer span.End()
 	logger := logging.FromContext(ctx)
 
 	logger.Warnf("stopping task run %q because of %q", tr.Name, reason)
@@ -710,6 +752,8 @@ func (c *Reconciler) failTaskRun(ctx context.Context, tr *v1beta1.TaskRun, reaso
 // createPod creates a Pod based on the Task's configuration, with pvcName as a volumeMount
 // TODO(dibyom): Refactor resource setup/substitution logic to its own function in the resources package
 func (c *Reconciler) createPod(ctx context.Context, ts *v1beta1.TaskSpec, tr *v1beta1.TaskRun, rtr *resources.ResolvedTaskResources, workspaceVolumes map[string]corev1.Volume) (*corev1.Pod, error) {
+	ctx, span := otel.Tracer(TRACE_NAME).Start(ctx, "createPod")
+	defer span.End()
 	logger := logging.FromContext(ctx)
 	inputResources, err := resourceImplBinding(rtr.Inputs, c.Images)
 	if err != nil {
@@ -799,6 +843,8 @@ func (c *Reconciler) createPod(ctx context.Context, ts *v1beta1.TaskSpec, tr *v1
 
 // applyParamsContextsResultsAndWorkspaces applies paramater, context, results and workspace substitutions to the TaskSpec.
 func applyParamsContextsResultsAndWorkspaces(ctx context.Context, tr *v1beta1.TaskRun, rtr *resources.ResolvedTaskResources, workspaceVolumes map[string]corev1.Volume) (*v1beta1.TaskSpec, error) {
+	ctx, span := otel.Tracer(TRACE_NAME).Start(ctx, "applyParamsContextsResultsAndWorkspaces")
+	defer span.End()
 	ts := rtr.TaskSpec.DeepCopy()
 	var defaults []v1beta1.ParamSpec
 	if len(ts.Params) > 0 {

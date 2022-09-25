@@ -42,6 +42,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/propagation"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
 )
@@ -83,6 +84,7 @@ func main() {
 	// Register our TracerProvider as the global so any imported
 	// instrumentation in the future will default to using it.
 	otel.SetTracerProvider(tp)
+  otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
