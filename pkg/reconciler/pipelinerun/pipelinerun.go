@@ -54,6 +54,10 @@ import (
 	"github.com/tektoncd/pipeline/pkg/remote"
 	resolution "github.com/tektoncd/pipeline/pkg/resolution/resource"
 	"github.com/tektoncd/pipeline/pkg/workspace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -122,6 +126,9 @@ const (
 	// ReasonResolvingPipelineRef indicates that the PipelineRun is waiting for
 	// its pipelineRef to be asynchronously resolved.
 	ReasonResolvingPipelineRef = "ResolvingPipelineRef"
+
+	// Name of the tracer
+	Tracer = "PipelineRunReconciler"
 )
 
 // Reconciler implements controller.Reconciler for Configuration resources.
@@ -153,6 +160,37 @@ var (
 func (c *Reconciler) ReconcileKind(ctx context.Context, pr *v1beta1.PipelineRun) pkgreconciler.Event {
 	logger := logging.FromContext(ctx)
 	ctx = cloudevent.ToContext(ctx, c.cloudEventClient)
+	carrier := make(map[string]string)
+	pro := otel.GetTextMapPropagator()
+
+	if _, e := pr.Annotations["pipelineSpanContext"]; !e {
+		ctx, span := otel.Tracer(Tracer).Start(ctx, "PipelineRun:Reconciler")
+		defer span.End()
+		span.SetAttributes(attribute.String("pipeline", pr.Name), attribute.String("namespace", pr.Namespace))
+
+		pro.Inject(ctx, propagation.MapCarrier(carrier))
+
+		marshalled, err := json.Marshal(carrier)
+		if err != nil {
+			return err
+		}
+		logger.Info("adding spancontext", "ctx", string(marshalled))
+		pr.Annotations["pipelineSpanContext"] = string(marshalled)
+		span.AddEvent("Updatng PipelineRun CR with SpanContext annotations")
+	}
+
+	err := json.Unmarshal([]byte(pr.Annotations["pipelineSpanContext"]), &carrier)
+	if err != nil {
+		return err
+	}
+
+	ctx = pro.Extract(ctx, propagation.MapCarrier(carrier))
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "PipelineRun:ReconcileKind")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("pipeline", pr.Name), attribute.String("namespace", pr.Namespace),
+	)
 
 	// Read the initial condition
 	before := pr.Status.GetCondition(apis.ConditionSucceeded)
@@ -182,6 +220,8 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pr *v1beta1.PipelineRun)
 		logger.Errorf("Failed to fetch pipeline func for pipeline %s: %w", pr.Spec.PipelineRef.Name, err)
 		pr.Status.MarkFailed(ReasonCouldntGetPipeline, "Error retrieving pipeline for pipelinerun %s/%s: %s",
 			pr.Namespace, pr.Name, err)
+		span.SetStatus(codes.Error, "Failed to fetch pipelinefunc")
+		span.RecordError(err)
 		return c.finishReconcileUpdateEmitEvents(ctx, pr, before, nil)
 	}
 
@@ -255,6 +295,8 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pr *v1beta1.PipelineRun)
 }
 
 func (c *Reconciler) durationAndCountMetrics(ctx context.Context, pr *v1beta1.PipelineRun) {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "durationAndCountMetrics")
+	defer span.End()
 	logger := logging.FromContext(ctx)
 	if pr.IsDone() {
 		// We get latest pipelinerun cr already to avoid recount
@@ -278,6 +320,8 @@ func (c *Reconciler) durationAndCountMetrics(ctx context.Context, pr *v1beta1.Pi
 }
 
 func (c *Reconciler) finishReconcileUpdateEmitEvents(ctx context.Context, pr *v1beta1.PipelineRun, beforeCondition *apis.Condition, previousError error) error {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "finishReconcileUpdateEmitEvents")
+	defer span.End()
 	logger := logging.FromContext(ctx)
 
 	afterCondition := pr.Status.GetCondition(apis.ConditionSucceeded)
@@ -303,6 +347,8 @@ func (c *Reconciler) resolvePipelineState(
 	pipelineMeta *metav1.ObjectMeta,
 	pr *v1beta1.PipelineRun,
 	providedResources map[string]*resourcev1alpha1.PipelineResource) (resources.PipelineRunState, error) {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "resolvePipelineState")
+	defer span.End()
 	pst := resources.PipelineRunState{}
 	// Resolve each task individually because they each could have a different reference context (remote or local).
 	for _, task := range tasks {
@@ -353,6 +399,8 @@ func (c *Reconciler) resolvePipelineState(
 }
 
 func (c *Reconciler) reconcile(ctx context.Context, pr *v1beta1.PipelineRun, getPipelineFunc rprp.GetPipeline) error {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "reconcile")
+	defer span.End()
 	defer c.durationAndCountMetrics(ctx, pr)
 	logger := logging.FromContext(ctx)
 	cfg := config.FromContextOrDefaults(ctx)
@@ -708,6 +756,8 @@ func (c *Reconciler) reconcile(ctx context.Context, pr *v1beta1.PipelineRun, get
 // custom task reconciler has its own logic for timing out a Run, this needs to be handled by the PipelineRun reconciler.
 // Custom tasks can do any cleanup during this step.
 func (c *Reconciler) processRunTimeouts(ctx context.Context, pr *v1beta1.PipelineRun, pipelineState resources.PipelineRunState) error {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "processRunTimeouts")
+	defer span.End()
 	errs := []string{}
 	logger := logging.FromContext(ctx)
 	if pr.IsCancelled() {
@@ -736,6 +786,8 @@ func (c *Reconciler) processRunTimeouts(ctx context.Context, pr *v1beta1.Pipelin
 // pipeline run state, and starts them
 // after all DAG tasks are done, it's responsible for scheduling final tasks and start executing them
 func (c *Reconciler) runNextSchedulableTask(ctx context.Context, pr *v1beta1.PipelineRun, pipelineRunFacts *resources.PipelineRunFacts, as artifacts.ArtifactStorageInterface) error {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "runNextSchedulableTask")
+	defer span.End()
 
 	logger := logging.FromContext(ctx)
 	recorder := controller.GetEventRecorder(ctx)
@@ -863,6 +915,8 @@ func (c *Reconciler) updateRunsStatusDirectly(pr *v1beta1.PipelineRun) error {
 }
 
 func (c *Reconciler) createTaskRuns(ctx context.Context, rpt *resources.ResolvedPipelineTask, pr *v1beta1.PipelineRun, storageBasePath string) ([]*v1beta1.TaskRun, error) {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "createTaskRuns")
+	defer span.End()
 	var taskRuns []*v1beta1.TaskRun
 	matrixCombinations := matrix.FanOut(rpt.PipelineTask.Matrix.Params).ToMap()
 	for i, taskRunName := range rpt.TaskRunNames {
@@ -877,6 +931,8 @@ func (c *Reconciler) createTaskRuns(ctx context.Context, rpt *resources.Resolved
 }
 
 func (c *Reconciler) createTaskRun(ctx context.Context, taskRunName string, params []v1beta1.Param, rpt *resources.ResolvedPipelineTask, pr *v1beta1.PipelineRun, storageBasePath string) (*v1beta1.TaskRun, error) {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "createTaskRun")
+	defer span.End()
 	logger := logging.FromContext(ctx)
 
 	tr, _ := c.taskRunLister.TaskRuns(pr.Namespace).Get(taskRunName)
@@ -894,6 +950,15 @@ func (c *Reconciler) createTaskRun(ctx context.Context, taskRunName string, para
 		logger.Infof("Updating taskrun %s with cleared status and retry history (length: %d).", tr.GetName(), len(tr.Status.RetriesStatus))
 		return c.PipelineClientSet.TektonV1beta1().TaskRuns(pr.Namespace).UpdateStatus(ctx, tr, metav1.UpdateOptions{})
 	}
+
+	carrier := make(map[string]string)
+	pro := otel.GetTextMapPropagator()
+	pro.Inject(ctx, propagation.MapCarrier(carrier))
+	marshalled, e := json.Marshal(carrier)
+	if e != nil {
+		return nil, e
+	}
+	pr.Annotations["spanContext"] = string(marshalled)
 
 	rpt.PipelineTask = resources.ApplyPipelineTaskContexts(rpt.PipelineTask)
 	taskRunSpec := pr.GetTaskRunSpec(rpt.PipelineTask.Name)
@@ -943,6 +1008,8 @@ func (c *Reconciler) createTaskRun(ctx context.Context, taskRunName string, para
 }
 
 func (c *Reconciler) createRuns(ctx context.Context, rpt *resources.ResolvedPipelineTask, pr *v1beta1.PipelineRun) ([]*v1alpha1.Run, error) {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "createRuns")
+	defer span.End()
 	var runs []*v1alpha1.Run
 	matrixCombinations := matrix.FanOut(rpt.PipelineTask.Matrix.Params).ToMap()
 	for i, runName := range rpt.RunNames {
@@ -957,6 +1024,8 @@ func (c *Reconciler) createRuns(ctx context.Context, rpt *resources.ResolvedPipe
 }
 
 func (c *Reconciler) createRun(ctx context.Context, runName string, params []v1beta1.Param, rpt *resources.ResolvedPipelineTask, pr *v1beta1.PipelineRun) (*v1alpha1.Run, error) {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "createRun")
+	defer span.End()
 	logger := logging.FromContext(ctx)
 	taskRunSpec := pr.GetTaskRunSpec(rpt.PipelineTask.Name)
 	params = append(params, rpt.PipelineTask.Params...)
@@ -1039,6 +1108,8 @@ func propagateWorkspaces(rpt *resources.ResolvedPipelineTask) (*resources.Resolv
 }
 
 func getTaskrunWorkspaces(ctx context.Context, pr *v1beta1.PipelineRun, rpt *resources.ResolvedPipelineTask) ([]v1beta1.WorkspaceBinding, string, error) {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "getTaskrunWorkspaces")
+	defer span.End()
 	var workspaces []v1beta1.WorkspaceBinding
 	var pipelinePVCWorkspaceName string
 	pipelineRunWorkspaces := make(map[string]v1beta1.WorkspaceBinding)
@@ -1235,6 +1306,8 @@ func addMetadataByPrecedence(metadata map[string]string, addedMetadata map[strin
 }
 
 func (c *Reconciler) updateLabelsAndAnnotations(ctx context.Context, pr *v1beta1.PipelineRun) (*v1beta1.PipelineRun, error) {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "updateLabelsAndAnnotations")
+	defer span.End()
 	newPr, err := c.pipelineRunLister.PipelineRuns(pr.Namespace).Get(pr.Name)
 	if err != nil {
 		return nil, fmt.Errorf("error getting PipelineRun %s when updating labels/annotations: %w", pr.Name, err)
@@ -1286,6 +1359,8 @@ func storePipelineSpecAndMergeMeta(pr *v1beta1.PipelineRun, ps *v1beta1.Pipeline
 }
 
 func (c *Reconciler) updatePipelineRunStatusFromInformer(ctx context.Context, pr *v1beta1.PipelineRun) error {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "updatePipelineRunStatusFromInformer")
+	defer span.End()
 	logger := logging.FromContext(ctx)
 
 	// Get the pipelineRun label that is set on each TaskRun.  Do not include the propagated labels from the
@@ -1307,6 +1382,8 @@ func (c *Reconciler) updatePipelineRunStatusFromInformer(ctx context.Context, pr
 }
 
 func updatePipelineRunStatusFromChildObjects(ctx context.Context, logger *zap.SugaredLogger, pr *v1beta1.PipelineRun, taskRuns []*v1beta1.TaskRun, runs []*v1alpha1.Run) error {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "updatePipelineRunStatusFromChildObjects")
+	defer span.End()
 	cfg := config.FromContextOrDefaults(ctx)
 	fullEmbedded := cfg.FeatureFlags.EmbeddedStatus == config.FullEmbeddedStatus || cfg.FeatureFlags.EmbeddedStatus == config.BothEmbeddedStatus
 	minimalEmbedded := cfg.FeatureFlags.EmbeddedStatus == config.MinimalEmbeddedStatus || cfg.FeatureFlags.EmbeddedStatus == config.BothEmbeddedStatus
@@ -1323,6 +1400,8 @@ func updatePipelineRunStatusFromChildObjects(ctx context.Context, logger *zap.Su
 }
 
 func validateChildObjectsInPipelineRunStatus(ctx context.Context, prs v1beta1.PipelineRunStatus) error {
+	ctx, span := otel.Tracer(Tracer).Start(ctx, "validateChildObjectsInPipelineRunStatus")
+	defer span.End()
 	cfg := config.FromContextOrDefaults(ctx)
 
 	var err error
