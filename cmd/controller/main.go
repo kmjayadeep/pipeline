@@ -41,8 +41,8 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/jaeger"
-	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
 )
@@ -50,14 +50,13 @@ import (
 const (
 	// ControllerLogKey is the name of the logger for the controller cmd
 	ControllerLogKey = "tekton-pipelines-controller"
-	Service          = "tektoncd"
 )
 
 // tracerProvider returns an OpenTelemetry TracerProvider configured to use
 // the Jaeger exporter that will send spans to the provided url. The returned
 // TracerProvider will also use a Resource configured with all the information
 // about the application.
-func tracerProvider(url string) (*tracesdk.TracerProvider, error) {
+func tracerProvider(service string, url string) (*tracesdk.TracerProvider, error) {
 	// Create the Jaeger exporter
 	exp, err := jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(url)))
 	if err != nil {
@@ -69,22 +68,21 @@ func tracerProvider(url string) (*tracesdk.TracerProvider, error) {
 		// Record information about this application in a Resource.
 		tracesdk.WithResource(resource.NewWithAttributes(
 			semconv.SchemaURL,
-			semconv.ServiceNameKey.String(Service),
+			semconv.ServiceNameKey.String(service),
 		)),
 	)
 	return tp, nil
 }
 
 func main() {
-	tp, err := tracerProvider("http://jaeger-collector.jaeger:14268/api/traces")
+	tpPipelineRun, err := tracerProvider("pipeline-reconciler", "http://jaeger-collector.jaeger:14268/api/traces")
+	tpTaskrun, err := tracerProvider("taskrun-reconciler", "http://jaeger-collector.jaeger:14268/api/traces")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Register our TracerProvider as the global so any imported
-	// instrumentation in the future will default to using it.
-	otel.SetTracerProvider(tp)
-  otel.SetTextMapPropagator(propagation.TraceContext{})
+	otel.SetTracerProvider(tpPipelineRun)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -94,7 +92,10 @@ func main() {
 		// Do not make the application hang when it is shutdown.
 		ctx, cancel = context.WithTimeout(ctx, time.Second*5)
 		defer cancel()
-		if err := tp.Shutdown(ctx); err != nil {
+		if err := tpPipelineRun.Shutdown(ctx); err != nil {
+			log.Fatal(err)
+		}
+		if err := tpTaskrun.Shutdown(ctx); err != nil {
 			log.Fatal(err)
 		}
 	}(ctx)
@@ -159,7 +160,7 @@ func main() {
 
 	ctx = filteredinformerfactory.WithSelectors(ctx, v1beta1.ManagedByLabelKey)
 	sharedmain.MainWithConfig(ctx, ControllerLogKey, cfg,
-		taskrun.NewController(opts, clock.RealClock{}),
+		taskrun.NewController(opts, clock.RealClock{}, tpTaskrun),
 		pipelinerun.NewController(opts, clock.RealClock{}),
 		run.NewController(),
 		resolutionrequest.NewController(clock.RealClock{}),
