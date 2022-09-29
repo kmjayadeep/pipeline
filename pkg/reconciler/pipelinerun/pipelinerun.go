@@ -162,6 +162,9 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pr *v1beta1.PipelineRun)
 	ctx = cloudevent.ToContext(ctx, c.cloudEventClient)
 	carrier := make(map[string]string)
 	pro := otel.GetTextMapPropagator()
+  if pr.Annotations == nil {
+    pr.Annotations = make(map[string]string)
+  }
 
 	if _, e := pr.Annotations["pipelineSpanContext"]; !e {
 		ctx, span := otel.Tracer(Tracer).Start(ctx, "PipelineRun:Reconciler")

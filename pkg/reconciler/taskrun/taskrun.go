@@ -106,6 +106,9 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, tr *v1beta1.TaskRun) pkg
 	ctx = cloudevent.ToContext(ctx, c.cloudEventClient)
 	carrier := make(map[string]string)
 	pro := otel.GetTextMapPropagator()
+  if tr.Annotations == nil {
+    tr.Annotations = make(map[string]string)
+  }
 
 	if _, e := tr.Annotations["spanContext"]; !e {
 		ctx, span := c.tracerProvider.Tracer(Tracer).Start(ctx, "TaskRun")
