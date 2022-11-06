@@ -46,6 +46,10 @@ require (
 	github.com/letsencrypt/boulder v0.0.0-20220929215747-76583552c2be
 	github.com/titanous/rocacheck v0.0.0-20171023193734-afe73141d399
 	k8s.io/utils v0.0.0-20221012122500-cfd413dd9e85
+	go.opentelemetry.io/otel v1.11.1
+	go.opentelemetry.io/otel/exporters/jaeger v1.11.1
+	go.opentelemetry.io/otel/sdk v1.11.1
+	go.opentelemetry.io/otel/trace v1.11.1
 )
 
 require (
@@ -65,6 +69,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.13.6 // indirect
 	github.com/emicklei/go-restful/v3 v3.9.0 // indirect
 	github.com/google/gnostic v0.6.9 // indirect
+	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/kr/pretty v0.3.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/rogpeppe/go-internal v1.8.0 // indirect
