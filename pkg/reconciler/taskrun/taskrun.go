@@ -18,6 +18,7 @@ package taskrun
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -533,8 +534,40 @@ func (c *Reconciler) reconcile(ctx context.Context, tr *v1.TaskRun, rtr *resourc
 		}
 	}
 
+	beforeSteps := make([]v1.StepState, len(tr.Status.Steps))
+	copy(beforeSteps, tr.Status.Steps)
+
 	// Convert the Pod's status to the equivalent TaskRun Status.
 	tr.Status, err = podconvert.MakeTaskRunStatus(ctx, logger, *tr, pod, c.KubeClientSet, rtr.TaskSpec)
+	for i, st := range tr.Status.Steps {
+
+		var bf, af []byte
+
+		if len(beforeSteps) != 0 {
+			bf, _ = json.Marshal(beforeSteps[i].ContainerState)
+		}
+		af, _ = json.Marshal(st.ContainerState)
+
+		if len(beforeSteps) == 0 || string(bf) != string(af) {
+
+			_, span := c.tracerProvider.Tracer(TracerName).Start(ctx, "status", trace.WithAttributes(attribute.String("step", st.Name)))
+			logger.Info("state changed", "before:", string(bf), string(af))
+
+			if st.Waiting != nil {
+				span.AddEvent("waiting", trace.WithAttributes(attribute.String("reason", st.Waiting.Reason)))
+			}
+			if st.Running != nil {
+				span.AddEvent("running", trace.WithAttributes(attribute.String("startedAt", st.Running.StartedAt.String())))
+			}
+			if st.Terminated != nil {
+				span.AddEvent("terminated", trace.WithAttributes(attribute.String("reason", st.Terminated.Reason)))
+			}
+
+			span.End()
+
+		}
+	}
+
 	if err != nil {
 		return err
 	}
