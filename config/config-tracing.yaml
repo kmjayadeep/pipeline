@@ -21,24 +21,7 @@ metadata:
     app.kubernetes.io/instance: default
     app.kubernetes.io/part-of: tekton-pipelines
 data:
-  _example: |
-    ################################
-    #                              #
-    #    EXAMPLE CONFIGURATION     #
-    #                              #
-    ################################
-    # This block is not actually functional configuration,
-    # but serves to illustrate the available configuration
-    # options and document them in a way that is accessible
-    # to users that `kubectl edit` this config map.
-    #
-    # These sample configuration options may be copied out of
-    # this example block and unindented to be in the data block
-    # to actually change the configuration.
-    #
-    # Enable sending traces to defined endpoint by setting this to true
-    enabled: "true"
-    #
-    # API endpoint to send the traces to
-    # (optional): The default value is given below
-    endpoint: "http://jaeger-collector.jaeger.svc.cluster.local:14268/api/traces"
+  enabled: "true"
+  # jaeger running in local cluster, not exposed to public internet
+  endpoint: "https://jaeger-collector.cosmos.cboxlab.com/api/traces"
+  credentialsSecret: "jaeger"

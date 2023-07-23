@@ -35,11 +35,13 @@ import (
 	"github.com/tektoncd/pipeline/pkg/reconciler/volumeclaim"
 	resolution "github.com/tektoncd/pipeline/pkg/resolution/resource"
 	"github.com/tektoncd/pipeline/pkg/tracing"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/clock"
 	kubeclient "knative.dev/pkg/client/injection/kube/client"
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
+	secretinformer "knative.dev/pkg/injection/clients/namespacedkube/informers/core/v1/secret"
 	"knative.dev/pkg/logging"
 )
 
@@ -59,9 +61,10 @@ func NewController(opts *pipeline.Options, clock clock.PassiveClock) func(contex
 		pipelineRunInformer := pipelineruninformer.Get(ctx)
 		resolutionInformer := resolutioninformer.Get(ctx)
 		verificationpolicyInformer := verificationpolicyinformer.Get(ctx)
-		tracerProvider := tracing.New(TracerProviderName)
+		secretinformer := secretinformer.Get(ctx)
+		tracerProvider := tracing.New(TracerProviderName, logger.Named("tracing"))
 		//nolint:contextcheck // OnStore methods does not support context as a parameter
-		configStore := config.NewStore(logger.Named("config-store"), pipelinerunmetrics.MetricsOnStore(logger), tracerProvider.OnStore(logger))
+		configStore := config.NewStore(logger.Named("config-store"), pipelinerunmetrics.MetricsOnStore(logger), tracerProvider.OnStore(secretinformer.Lister()))
 		configStore.WatchConfigs(cmw)
 
 		c := &Reconciler{
@@ -85,6 +88,15 @@ func NewController(opts *pipeline.Options, clock clock.PassiveClock) func(contex
 				ConfigStore: configStore,
 			}
 		})
+
+		secretinformer.Informer().AddEventHandler(controller.HandleAll(func(obj interface{}) {
+			secret, ok := obj.(*corev1.Secret)
+			if !ok {
+				logger.Error("Failed to do type assertion for Secret")
+				return
+			}
+			tracerProvider.OnSecret(secret)
+		}))
 
 		pipelineRunInformer.Informer().AddEventHandler(controller.HandleAll(impl.Enqueue))
 

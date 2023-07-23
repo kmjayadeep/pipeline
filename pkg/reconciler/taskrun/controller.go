@@ -35,6 +35,7 @@ import (
 	"github.com/tektoncd/pipeline/pkg/spire"
 	"github.com/tektoncd/pipeline/pkg/taskrunmetrics"
 	"github.com/tektoncd/pipeline/pkg/tracing"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/clock"
 	kubeclient "knative.dev/pkg/client/injection/kube/client"
@@ -42,6 +43,7 @@ import (
 	filteredpodinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/pod/filtered"
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
+	secretinformer "knative.dev/pkg/injection/clients/namespacedkube/informers/core/v1/secret"
 	"knative.dev/pkg/logging"
 )
 
@@ -61,10 +63,11 @@ func NewController(opts *pipeline.Options, clock clock.PassiveClock) func(contex
 		limitrangeInformer := limitrangeinformer.Get(ctx)
 		verificationpolicyInformer := verificationpolicyinformer.Get(ctx)
 		resolutionInformer := resolutioninformer.Get(ctx)
+		secretinformer := secretinformer.Get(ctx)
 		spireClient := spire.GetControllerAPIClient(ctx)
-		tracerProvider := tracing.New(TracerProviderName)
+		tracerProvider := tracing.New(TracerProviderName, logger.Named("tracing"))
 		//nolint:contextcheck // OnStore methods does not support context as a parameter
-		configStore := config.NewStore(logger.Named("config-store"), taskrunmetrics.MetricsOnStore(logger), spire.OnStore(ctx, logger), tracerProvider.OnStore(logger))
+		configStore := config.NewStore(logger.Named("config-store"), taskrunmetrics.MetricsOnStore(logger), spire.OnStore(ctx, logger), tracerProvider.OnStore(secretinformer.Lister()))
 		configStore.WatchConfigs(cmw)
 
 		entrypointCache, err := pod.NewEntrypointCache(kubeclientset)
@@ -95,6 +98,15 @@ func NewController(opts *pipeline.Options, clock clock.PassiveClock) func(contex
 				ConfigStore: configStore,
 			}
 		})
+
+		secretinformer.Informer().AddEventHandler(controller.HandleAll(func(obj interface{}) {
+			secret, ok := obj.(*corev1.Secret)
+			if !ok {
+				logger.Error("Failed to do type assertion for Secret")
+				return
+			}
+			tracerProvider.OnSecret(secret)
+		}))
 
 		taskRunInformer.Informer().AddEventHandler(controller.HandleAll(impl.Enqueue))
 

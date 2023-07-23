@@ -26,7 +26,7 @@ import (
 )
 
 func TestNewTracerProvider(t *testing.T) {
-	tp := tracing.New("test-serice")
+	tp := tracing.New("test-service", zap.NewNop().Sugar())
 
 	tracer := tp.Tracer("tracer")
 	_, span := tracer.Start(context.TODO(), "example")
@@ -39,13 +39,13 @@ func TestNewTracerProvider(t *testing.T) {
 }
 
 func TestOnStore(t *testing.T) {
-	tp := tracing.New("test-service")
+	tp := tracing.New("test-service", zap.NewNop().Sugar())
 
 	cfg := &config.Tracing{
 		Enabled: false,
 	}
 
-	tp.OnStore(zap.NewExample().Sugar())("config-tracing", cfg)
+	tp.OnStore(nil)("config-tracing", cfg)
 
 	tracer := tp.Tracer("tracer")
 	_, span := tracer.Start(context.TODO(), "example")
@@ -58,14 +58,14 @@ func TestOnStore(t *testing.T) {
 }
 
 func TestOnStoreWithEnabled(t *testing.T) {
-	tp := tracing.New("test-service")
+	tp := tracing.New("test-service", zap.NewNop().Sugar())
 
 	cfg := &config.Tracing{
 		Enabled:  true,
 		Endpoint: "test-endpoint",
 	}
 
-	tp.OnStore(zap.NewExample().Sugar())("config-tracing", cfg)
+	tp.OnStore(nil)("config-tracing", cfg)
 
 	tracer := tp.Tracer("tracer")
 	_, span := tracer.Start(context.TODO(), "example")
