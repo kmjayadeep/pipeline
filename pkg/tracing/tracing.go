@@ -21,12 +21,14 @@ import (
 
 	"github.com/tektoncd/pipeline/pkg/apis/config"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/jaeger"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/embedded"
+	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -34,6 +36,8 @@ import (
 )
 
 type tracerProvider struct {
+	embedded.TracerProvider
+
 	service  string
 	provider trace.TracerProvider
 	cfg      *config.Tracing
@@ -50,7 +54,7 @@ func init() {
 func New(service string, logger *zap.SugaredLogger) *tracerProvider {
 	return &tracerProvider{
 		service:  service,
-		provider: trace.NewNoopTracerProvider(),
+		provider: noop.NewTracerProvider(),
 		logger:   logger,
 	}
 }
@@ -144,14 +148,19 @@ func (t *tracerProvider) reinitialize() {
 
 func createTracerProvider(service string, cfg *config.Tracing, user, pass string) (trace.TracerProvider, error) {
 	if !cfg.Enabled {
-		return trace.NewNoopTracerProvider(), nil
+		return noop.NewTracerProvider(), nil
 	}
 
-	exp, err := jaeger.New(jaeger.WithCollectorEndpoint(
-		jaeger.WithEndpoint(cfg.Endpoint),
-		jaeger.WithUsername(user),
-		jaeger.WithPassword(pass),
-	))
+	ctx := context.Background()
+	exp, err := otlptracehttp.New(ctx,
+		otlptracehttp.WithEndpoint(cfg.Endpoint),
+	)
+
+	// exp, err := jaeger.New(jaeger.WithCollectorEndpoint(
+	//   jaeger.WithEndpoint(cfg.Endpoint),
+	//   jaeger.WithUsername(user),
+	//   jaeger.WithPassword(pass),
+	// ))
 	if err != nil {
 		return nil, err
 	}
