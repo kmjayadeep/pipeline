@@ -18,6 +18,9 @@ package tracing
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
+	"net/url"
 
 	"github.com/tektoncd/pipeline/pkg/apis/config"
 	"go.opentelemetry.io/otel"
@@ -150,17 +153,32 @@ func createTracerProvider(service string, cfg *config.Tracing, user, pass string
 	if !cfg.Enabled {
 		return noop.NewTracerProvider(), nil
 	}
+	u, err := url.Parse(cfg.Endpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := []otlptracehttp.Option{
+		otlptracehttp.WithEndpoint(u.Host),
+		otlptracehttp.WithURLPath(u.Path),
+	}
+
+	if u.Scheme == "http" {
+		opts = append(opts, otlptracehttp.WithInsecure())
+	}
+
+	if user != "" && pass != "" {
+		creds := fmt.Sprintf("%s:%s", user, pass)
+		enc := base64.StdEncoding.EncodeToString([]byte(creds))
+		o := otlptracehttp.WithHeaders(map[string]string{
+			"Authorization": fmt.Sprintf("Basic %s", enc),
+		})
+		opts = append(opts, o)
+	}
 
 	ctx := context.Background()
-	exp, err := otlptracehttp.New(ctx,
-		otlptracehttp.WithEndpoint(cfg.Endpoint),
-	)
+	exp, err := otlptracehttp.New(ctx, opts...)
 
-	// exp, err := jaeger.New(jaeger.WithCollectorEndpoint(
-	//   jaeger.WithEndpoint(cfg.Endpoint),
-	//   jaeger.WithUsername(user),
-	//   jaeger.WithPassword(pass),
-	// ))
 	if err != nil {
 		return nil, err
 	}
